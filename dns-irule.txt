@@ -1,0 +1,21 @@
+ltm rule /Common/dns_responder-1-3646036501 {
+    when DNS_REQUEST {
+
+       log local0. "\[DNS::question name\]: [DNS::question name],\
+                \[DNS::question class\]: [DNS::question class],
+                \[DNS::question type\]: [DNS::question type]"
+        if { [DNS::question type] == "A" } {
+            DNS::header rcode NXDOMAIN
+            #DNS::answer insert "[DNS::question name]. 5 [DNS::question class] [DNS::question type] 1.1.1.1"
+            log local0. " \[DNS::question type\]: [DNS::question type] 1.1.1.1"
+        } elseif { [DNS::question type] == "AAAA" } {
+            DNS::header rcode NXDOMAIN
+            #DNS::answer insert "[DNS::question name]. 111 [DNS::question class] [DNS::question type] ::1.1.1.2"
+            #log local0. " \[DNS::question type\]: [DNS::question type] ::1.1.1.2"
+        }
+
+        DNS::return
+
+        }
+}
+

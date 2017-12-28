@@ -1,0 +1,134 @@
+http://blog.wrouesnel.com/articles/Totally%20static%20Go%20builds/
+
+build golang program and link statically so it can be run on BIGIP:
+
+vincent@Kubernete-Dev:~$ CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o go-bigip-rest1 go-bigip-rest1.go
+
+package main
+
+import (
+        "encoding/json"
+        "log"
+        "math/rand"
+        "strconv"
+        "time"
+
+        "github.com/e-XpertSolutions/f5-rest-client/f5"
+        "github.com/e-XpertSolutions/f5-rest-client/f5/ltm"
+        "github.com/e-XpertSolutions/f5-rest-client/f5/sys"
+)
+
+//build golang program and link statically so it can be run on BIGIP
+//CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' -o go-bigip-rest1 go-bigip-rest1.go
+
+func sexyPrint(label string, a interface{}) {
+        j, err := json.MarshalIndent(a, "", "   ")
+        if err != nil {
+                log.Fatal(err)
+        }
+        log.Print("DEBUG ", label, ":\n", string(j))
+}
+
+func main() {
+        // setup F5 BigIP client
+        f5Client, err := f5.NewBasicClient("https://172.24.46.32", "admin", "admin")
+        if err != nil {
+                log.Fatal(err)
+        }
+
+        s1 := rand.NewSource(time.Now().UnixNano())
+        r1 := rand.New(s1)
+
+        vip := strconv.Itoa(r1.Intn(255)) + "." + strconv.Itoa(r1.Intn(255)) + "." + strconv.Itoa(r1.Intn(255)) + "." + strconv.Itoa(r1.Intn(255))
+        log.Printf("vip is %s\n", vip)
+
+        f5Client.DisableCertCheck()
+        // Start new transaction.
+        tx, err := f5Client.Begin()
+        if err != nil {
+                log.Fatal(err)
+        }
+        ltmClient := ltm.New(tx)
+
+        // Create a HTTP monitor
+        log.Print("Create a HTTP monitor")
+
+        monitorConfig := ltm.MonitorHTTPConfig{
+                Name: "http_monitor_" + tx.TransactionID(),
+                Send: "GET / HTTP/1.0\r\n\r\n",
+                Recv: "Hello",
+        }
+
+        if err := ltmClient.MonitorHTTP().Create(monitorConfig); err != nil {
+                log.Fatal(err)
+        }
+        // Create a Pool
+        log.Print("Create a pool")
+
+        poolConfig := ltm.Pool{
+                Name:    "pool_" + tx.TransactionID(),
+                Monitor: "/Common/http_monitor_" + tx.TransactionID(),
+                Members: []string{"10.1.10.10:80", "10.1.10.11:80"},
+        }
+
+        if err := ltmClient.Pool().Create(poolConfig); err != nil {
+                log.Fatal(err)
+        }
+        // Create a Virtual Server
+        log.Print("Create a Virtual Server")
+
+        vsConfig := ltm.VirtualServer{
+                Name:        "vs_http_" + tx.TransactionID(),
+                Destination: vip + ":80",
+                IPProtocol:  "tcp",
+                Pool:        "pool_" + tx.TransactionID(),
+                SourceAddressTranslation: ltm.SourceAddressTranslation{
+                        Type: "automap",
+                },
+                Profiles: []ltm.Profile{
+                        {
+                                Name:    "tcp-mobile-optimized",
+                                Context: "all",
+                        },
+                        {
+                                Name: "http",
+                        },
+                },
+                Rules: []string{"http_responder", "http_responder1"},
+        }
+
+        if err := ltmClient.Virtual().Create(vsConfig); err != nil {
+                log.Fatal(err)
+        }
+
+        // Commit to make the changes persistent.
+        if err := tx.Commit(); err != nil {
+                log.Fatal(err)
+        }
+
+        //List SSL Certificates
+
+        sysClient := sys.New(f5Client)
+        certs, err := sysClient.FileSSLCert().ListAll()
+        if err != nil {
+                log.Fatal(err)
+        }
+        sexyPrint("Certificates", certs)
+
+        // List expired SSL Certificates
+
+        expired_certs, err := sysClient.FileSSLCert().ListExpired()
+        if err != nil {
+                log.Fatal(err)
+        }
+        sexyPrint("Expired Certificates", expired_certs)
+
+        // ListExpiring(number_of_seconds)
+        expiring_certs, err := sysClient.FileSSLCert().ListExpiring(60 * 60 * 24 * 15)
+        if err != nil {
+                log.Fatal(err)
+        }
+        sexyPrint("Expiring Certificates", expiring_certs)
+
+}
+

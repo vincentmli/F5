@@ -1,0 +1,278 @@
+Environment:
+K8S All in one node running on a VM with two interfaces, ens3 for management, ens7 for k8s node/pod network
+
+vincent@Kubernete-Dev:~/kubernetes$ ip addr show dev ens3
+
+ 
+
+2: ens3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+
+    link/ether 52:54:00:ac:0c:27 brd ff:ff:ff:ff:ff:ff
+
+    inet 192.168.48.68/24 brd 192.168.48.255 scope global ens3
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::5054:ff:feac:c27/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+ 
+
+vincent@Kubernete-Dev:~/kubernetes$ ip addr show ens7
+
+3: ens7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+
+    link/ether 52:54:00:cf:3c:e0 brd ff:ff:ff:ff:ff:ff
+
+    inet 192.168.1.1/24 brd 192.168.1.255 scope global ens7
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::5054:ff:fecf:3ce0/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+ 
+
+BIGIP VE VM
+
+[root@bigip-kvm:Active:Standalone] config # tmsh list net self
+
+net self external {
+
+    address 192.168.1.2/24
+
+    allow-service all
+
+    traffic-group traffic-group-local-only
+
+    vlan external
+
+}
+
+ 
+
+ 
+ follow link below to setup All-in-one K8S, replace all 127.0.0.1 with 192.168.1.1 in hack/local-up-cluster.sh
+
+https://github.com/kubernetes/community/blob/master/contributors/devel/running-locally.md
+
+**KUBEPROXY_MODE=ipvs is new kube proxy mode, performance is better than iptables**
+see https://github.com/kubernetes/kubernetes/tree/master/pkg/proxy/ipvs
+
+1: start k8s
+
+root@Kubernete-Dev:/home/vincent/kubernetes# KUBEPROXY_MODE=ipvs hack/local-up-cluster.sh -O
+WARNING : The kubelet is configured to not fail if swap is enabled; production deployments should disable swap.
+skipped the build.
+WARNING: No swap limit support
+Kubelet cgroup driver defaulted to use: cgroupfs
+API SERVER insecure port is free, proceeding...
+API SERVER secure port is free, proceeding...
+Detected host and ready to start services.  Doing some housekeeping first...
+Using GO_OUT /home/vincent/kubernetes/_output/bin
+Starting services now!
+Starting etcd
+etcd --advertise-client-urls http://127.0.0.1:2379 --data-dir /tmp/tmp.K1tMwh88m3 --listen-client-urls http://127.0.0.1:2379 --debug > "/dev/null" 2>/dev/null
+Waiting for etcd to come up.
++++ [0110 10:54:27] On try 2, etcd: : http://127.0.0.1:2379
+{"action":"set","node":{"key":"/_test","value":"","modifiedIndex":4,"createdIndex":4}}
+Generating a 2048 bit RSA private key
+.................................................................................................................+++
+.....................+++
+writing new private key to '/var/run/kubernetes/server-ca.key'
+-----
+Generating a 2048 bit RSA private key
+...........+++
+Local Kubernetes cluster is running. Press Ctrl-C to shut it down.
+
+Logs:
+  /tmp/kube-apiserver.log
+  /tmp/kube-controller-manager.log
+  /tmp/kube-proxy.log
+  /tmp/kube-scheduler.log
+  /tmp/kubelet.log
+
+To start using your cluster, you can open up another terminal/tab and run:
+
+  export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig
+  cluster/kubectl.sh
+
+Alternatively, you can write to the default kubeconfig:
+
+  export KUBERNETES_PROVIDER=local
+
+  cluster/kubectl.sh config set-cluster local --server=https://localhost:6443 --
+  cluster/kubectl.sh config set-credentials myself --client-key=/var/run/kuberne
+  cluster/kubectl.sh config set-context local --cluster=local --user=myself
+  cluster/kubectl.sh config use-context local
+  cluster/kubectl.sh
+
+2: create bigip admin login secret in k8s
+
+
+vincent@Kubernete-Dev:~/kubernetes$cluster/kubectl.sh create secret generic bigip-login --namespace kube-system --from-literal=username=admin --from-literal=password=admin
+
+3: deployment F5 k8s-bigip-ctlr
+
+ 
+vincent@Kubernete-Dev:~/kubernetes$cluster/kubectl.sh apply -f f5-k8s-bigip-ctlr-deployment.yaml
+
+4: show the f5-k8s-bigip-ctlr pod
+vincent@Kubernete-Dev:~/kubernetes$cluster/kubectl.sh get po --namespace=kube-system
+NAME                                       READY     STATUS    RESTARTS   AGE
+kube-dns-6c857864fb-kn4gw                  3/3       Running   0          1d
+test-bigip-controller-1-67864586dd-cvnrg   1/1       Running   0          23h
+
+5: show f5-k8s-bigip-ctlr pod logs
+
+
+vincent@Kubernete-Dev:~/kubernetes$ cluster/kubectl.sh logs test-bigip-controller-1-67864586dd-cvnrg --namespace=kube-system | tail -10
+
+2018/01/11 22:02:19 [INFO] [2018-01-11 22:02:19,216 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:21 [INFO] [2018-01-11 22:02:21,391 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:23 [INFO] [2018-01-11 22:02:23,413 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:25 [INFO] [2018-01-11 22:02:25,328 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:27 [INFO] [2018-01-11 22:02:27,332 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:29 [INFO] [2018-01-11 22:02:29,392 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:31 [INFO] [2018-01-11 22:02:31,402 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:33 [INFO] [2018-01-11 22:02:33,511 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:35 [INFO] [2018-01-11 22:02:35,527 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+2018/01/11 22:02:37 [INFO] [2018-01-11 22:02:37,500 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+ 
+f5-k8s-bigip-ctlr-deployment.yaml
+
+#
+# https://github.com/kubernetes/community/blob/master/contributors/devel/running-locally.md
+# change kubernetes/hack/local-up-cluster.sh all 127.0.0.1 to private ip 192.168.1.1 that external k8s BIGIP can reach to
+
+# http://clouddocs.f5.com/containers/v2/kubernetes/kctlr-app-install.html
+# step 1:
+#create BIGIP login secret first
+#kubectl create secret generic bigip-login --namespace kube-system --from-literal=username=admin --from-literal=password=admin
+
+# step 2:
+# cluster/kubectl.sh apply -f following yaml
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+  labels:
+    app: test-bigip-controller-1
+  name: test-bigip-controller-1
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-bigip-controller-1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: test-bigip-controller-1
+    spec:
+      serviceAccountName: bigip-ctlr-serviceaccount
+      containers:
+      - args:
+        - --bigip-partition
+        - test
+        - --bigip-url
+        - 192.168.1.2
+        - --bigip-username
+        - admin
+        - --bigip-password
+        - admin
+        - --verify-interval
+        - "2"
+        - --namespace
+        - default
+        - --node-poll-interval
+        - "1"
+        - --pool-member-type
+        - nodeport
+        - --log-level
+        - INFO
+        command:
+        - /app/bin/k8s-bigip-ctlr
+        image: f5networks/k8s-bigip-ctlr:latest
+        imagePullPolicy: Always
+        name: test-bigip-controller-1
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128M
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bigip-ctlr-serviceaccount
+  namespace: kube-system
+
+---
+
+# for use in k8s clusters using RBAC
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: bigip-ctlr-clusterrole
+rules:
+- apiGroups:
+  - ""
+  - "extensions"
+  resources:
+  - nodes
+  - services
+  - endpoints
+  - namespaces
+  - ingresses
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  - "extensions"
+  resources:
+  - configmaps
+  - events
+  - ingresses/status
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - create
+  - patch
+
+---
+
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: bigip-ctlr-clusterrole-binding
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: bigip-ctlr-clusterrole
+subjects:
+- kind: ServiceAccount
+  name: bigip-ctlr-serviceaccount
+  namespace: kube-system
+
+
+

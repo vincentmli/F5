@@ -1,0 +1,921 @@
+
+This is a hack around Running All-In-One Kubernetes and BIGIP k8s-bigip-ctlr to run Kubernetes with multiple worker node
+
+hack idea:
+
+1, replace docker network with flannel vxlan network so worker node/pod can communicate with each other in multi-node cluster,
+
+2, etcd by default listen on 127.0.0.1 in All-in-one mode, make it listen on 0.0.0.0 since flannel on each worker node needs to talk to etcd
+
+from kubernetes/hack/lib/etcd.sh, we can set the ETCD_HOST environment variable, thus:
+
+[root@fed-master kubernetes]# ETCD_HOST=0.0.0.0 hack/local-up-cluster.sh -O
+
+Leave the docker and flanneld running on all worker nodes,  when each time to start kubernetes, we need to re-add the flannel network config
+
+and add each worker node because the etcd configuration started by hack/local-up-cluster.sh clean up everything when it quits
+
+the docker0 and flannel link may look like:
+
+Master node:
+
+33: flannel.1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1350 qdisc noqueue state UNKNOWN group default
+
+    link/ether 6a:ce:e5:ac:a1:f1 brd ff:ff:ff:ff:ff:ff
+
+    inet 18.16.95.0/32 scope global flannel.1
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::68ce:e5ff:feac:a1f1/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+34: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1350 qdisc noqueue state UP group default
+
+    link/ether 02:42:4c:a1:e7:50 brd ff:ff:ff:ff:ff:ff
+
+    inet 18.16.95.1/24 scope global docker0
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::42:4cff:fea1:e750/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+Worker node:
+
+6: flannel.1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1350 qdisc noqueue state UNKNOWN group default
+
+    link/ether a6:f5:5d:cc:94:3e brd ff:ff:ff:ff:ff:ff
+
+    inet 18.16.100.0/32 scope global flannel.1
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::a4f5:5dff:fecc:943e/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+7: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1350 qdisc noqueue state UP group default
+
+    link/ether 02:42:d9:0c:05:a9 brd ff:ff:ff:ff:ff:ff
+
+    inet 18.16.100.1/24 scope global docker0
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::42:d9ff:fe0c:5a9/64 scope link
+
+       valid_lft forever preferred_lft forever
+so the running order is:
+1 #ETCD_HOST=0.0.0.0 hack/local-up-cluster.sh -O
+2  create the configuartion (note the etcdctl is the one installed hack/install-etcd.sh under kubernetes/third_party/etcd)
+
+[root@fed-master kubernetes]# cat flannel-config.json
+
+{
+
+    "Network": "18.16.0.0/16",
+
+    "SubnetLen": 24,
+
+    "Backend": {
+
+        "Type": "vxlan",
+
+        "VNI": 1
+
+     }
+
+}
+
+[root@fed-master kubernetes]# etcdctl set /coreos.com/network/config < flannel-config.json
+{
+    "Network": "18.16.0.0/16",
+    "SubnetLen": 24,
+    "Backend": {
+        "Type": "vxlan",
+        "VNI": 1
+     }
+}
+
+[root@fed-master kubernetes]# etcdctl get /coreos.com/network/config
+{
+    "Network": "18.16.0.0/16",
+    "SubnetLen": 24,
+    "Backend": {
+        "Type": "vxlan",
+        "VNI": 1
+     }
+}
+
+3, add the worker node (Note add fed-node2 in /etc/hosts)
+
+ 
+
+[root@fed-master kubernetes]# cat fed-node2.json
+
+ {
+
+     "apiVersion": "v1",
+
+     "kind": "Node",
+
+     "metadata": {
+
+         "name": "fed-node2",
+
+         "labels":{ "name": "fed-node2-label"}
+
+     },
+
+     "spec": {
+
+         "externalID": "fed-node2"
+
+     }
+
+ }
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get no -o wide
+NAME          STATUS    ROLES     AGE       VERSION                     EXTERNAL-IP   OS-IMAGE                 KERNEL-VERSION           CONTAINER-RUNTIME
+192.168.1.3   Ready     <none>    4m        v0.0.0-master+$Format:%h$   <none>        Fedora 26 (Twenty Six)   4.11.8-300.fc26.x86_64   docker://1.13.1
+fed-node2     Ready     <none>    14s       v1.7.3                      <none>        Fedora 26 (Twenty Six)   4.11.8-300.fc26.x86_64   docker://1.13.1
+
+ 
+ 4 the rest for k8s-bigip-ctrl is same
+
+[root@fed-master kubernetes]# cluster/kubectl.sh create secret generic bigip-login --namespace kube-system --from-literal=username=admin --from-literal=password=admin
+
+secret "bigip-login" created
+
+[root@fed-master kubernetes]# cluster/kubectl.sh apply -f f5-k8s-bigip-ctlr-deployment.yaml
+
+deployment "test-bigip-controller-1" created
+
+serviceaccount "bigip-ctlr-serviceaccount" created
+
+clusterrole "bigip-ctlr-clusterrole" created
+
+clusterrolebinding "bigip-ctlr-clusterrole-binding" created
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get po --namespace=kube-system -o wide
+
+NAME                                       READY     STATUS    RESTARTS   AGE       IP            NODE
+
+kube-dns-774d5484cc-942n2                  3/3       Running   0          10m       18.16.95.2    192.168.1.3
+
+test-bigip-controller-1-67864586dd-p6djt   1/1       Running   0          53s       18.16.100.2   fed-node2  <===as you can see the k8s-bigip-ctrl is deployed in worker node fed-node2
+
+[root@fed-master kubernetes]# cluster/kubectl.sh log test-bigip-controller-1-67864586dd-p6djt --namespace=kube-system | tail -5
+
+W0117 15:12:03.529103   11055 cmd.go:354] log is DEPRECATED and will be removed in a future version. Use logs instead.
+
+2018/01/17 23:11:53 [INFO] [2018-01-17 23:11:53,625 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+2018/01/17 23:11:55 [INFO] [2018-01-17 23:11:55,811 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+2018/01/17 23:11:57 [INFO] [2018-01-17 23:11:57,927 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+2018/01/17 23:11:59 [INFO] [2018-01-17 23:11:59,849 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+2018/01/17 23:12:01 [INFO] [2018-01-17 23:12:01,940 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+
+ISSUE
+
+use flannel is kind of painful, when restarting k8s/docker/flanneld, I can't start k8s because k8s depend on docker, but docker can't start because docker depend flanneld once flanneld is configured to run to support docker. but flanneld can't start  because flanneld depend on etcd which is part of k8s that is started by hack/local-up-cluster.sh, so this is a dead loop
+
+Solution 1:
+
+  not to use flannel, just use docker bridge network in all worker node, docker default network is 172.17.0.1/16, then all worker node docker0 could all have the same 172.17.0.1/16
+
+6: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default
+
+    link/ether 02:42:80:bd:79:37 brd ff:ff:ff:ff:ff:ff
+
+    inet 172.17.0.1/16 scope global docker0
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::42:80ff:febd:7937/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+
+I can workaround this by configure custom docker network:
+
+
+[root@fed-node2 ~]# cat /etc/sysconfig/docker-network
+
+# /etc/sysconfig/docker-network
+
+DOCKER_NETWORK_OPTIONS="--bip=172.17.2.1/24 --fixed-cidr=172.17.2.0/24"
+
+4: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default
+
+    link/ether 02:42:76:e2:9e:60 brd ff:ff:ff:ff:ff:ff
+
+    inet 172.17.2.1/24 scope global docker0
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::42:76ff:fee2:9e60/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get po --namespace=kube-system -o wide
+
+NAME                                       READY     STATUS    RESTARTS   AGE       IP           NODE
+
+kube-dns-774d5484cc-f9zkw                  3/3       Running   0          1h        172.17.0.2   192.168.1.3
+
+test-bigip-controller-1-67864586dd-lvrdq   1/1       Running   0          14m       172.17.2.2   fed-node2
+
+ This seems like better quick setup solution
+
+
+Solution 2: (this is preferred solution)
+
+I found I am able starting up k8s without docker dependency, make a copy of hack/local-up-cluster.sh to hack/multi-node-cluster.sh
+
+and change the hack/multi-node-cluster.sh not depending on docker, now reboot the k8s master/worker node, once k8s started, re-create the flannel vxlan network
+
+flanneld will start ok and re-start docker
+
+#KUBEPROXY_MODE=ipvs ETCD_HOST=0.0.0.0 hack/multi-node-cluster.sh -O
+
+
+[root@fed-master kubernetes]# diff -u hack/local-up-cluster.sh hack/multi-node-cluster.sh
+--- hack/local-up-cluster.sh    2018-01-18 10:48:55.050801098 -0800
++++ hack/multi-node-cluster.sh  2018-01-19 10:43:54.163855014 -0800
+@@ -15,6 +15,7 @@
+ # limitations under the License.
+
+ KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
++MASTER_IP="192.168.1.3"
+
+ # This command builds and runs a local kubernetes cluster.
+ # You may need to run this as root to allow kubelet to open docker's socket,
+@@ -64,7 +65,7 @@
+ KUBECTL=${KUBECTL:-cluster/kubectl.sh}
+ WAIT_FOR_URL_API_SERVER=${WAIT_FOR_URL_API_SERVER:-20}
+ ENABLE_DAEMON=${ENABLE_DAEMON:-false}
+-HOSTNAME_OVERRIDE=${HOSTNAME_OVERRIDE:-"127.0.0.1"}
++HOSTNAME_OVERRIDE=${HOSTNAME_OVERRIDE:-"${MASTER_IP}"}
+ EXTERNAL_CLOUD_PROVIDER=${EXTERNAL_CLOUD_PROVIDER:-false}
+ CLOUD_PROVIDER=${CLOUD_PROVIDER:-""}
+ CLOUD_CONFIG=${CLOUD_CONFIG:-""}
+@@ -219,12 +220,12 @@
+
+ # WARNING: For DNS to work on most setups you should export API_HOST as the docker0 ip address,
+ API_HOST=${API_HOST:-localhost}
+-API_HOST_IP=${API_HOST_IP:-"127.0.0.1"}
++API_HOST_IP=${API_HOST_IP:-"${MASTER_IP}"}
+ ADVERTISE_ADDRESS=${ADVERTISE_ADDRESS:-""}
+ API_BIND_ADDR=${API_BIND_ADDR:-"0.0.0.0"}
+ EXTERNAL_HOSTNAME=${EXTERNAL_HOSTNAME:-localhost}
+
+-KUBELET_HOST=${KUBELET_HOST:-"127.0.0.1"}
++KUBELET_HOST=${KUBELET_HOST:-"${MASTER_IP}"}
+ # By default only allow CORS for requests on localhost
+ API_CORS_ALLOWED_ORIGINS=${API_CORS_ALLOWED_ORIGINS:-/127.0.0.1(:[0-9]+)?$,/localhost(:[0-9]+)?$}
+ KUBELET_PORT=${KUBELET_PORT:-10250}
+@@ -797,7 +798,7 @@
+         -i \
+         --cidfile=$KUBELET_CIDFILE \
+         gcr.io/google_containers/kubelet \
+-        /kubelet --v=${LOG_LEVEL} --containerized ${priv_arg}--chaos-chance="${CHAOS_CHANCE}" --pod-manifest-path="${POD_MANIFEST_PATH}" --hostname-override="${HOSTNAME_OVERRIDE}" ${cloud_config_arg} \ --address="127.0.0.1" --kubeconfig "$CERT_DIR"/kubelet.kubeconfig --port="$KUBELET_PORT"  --enable-controller-attach-detach="${ENABLE_CONTROLLER_ATTACH_DETACH}" &> $KUBELET_LOG &
++        /kubelet --v=${LOG_LEVEL} --containerized ${priv_arg}--chaos-chance="${CHAOS_CHANCE}" --pod-manifest-path="${POD_MANIFEST_PATH}" --hostname-override="${HOSTNAME_OVERRIDE}" ${cloud_config_arg} \ --address="${MASTER_IP}" --kubeconfig "$CERT_DIR"/kubelet.kubeconfig --port="$KUBELET_PORT"  --enable-controller-attach-detach="${ENABLE_CONTROLLER_ATTACH_DETACH}" &> $KUBELET_LOG &
+     fi
+ }
+
+@@ -949,9 +950,9 @@
+   kube::etcd::validate
+ fi
+
+-if [ "${CONTAINER_RUNTIME}" == "docker" ] && ! kube::util::ensure_docker_daemon_connectivity; then
+-  exit 1
+-fi
++#if [ "${CONTAINER_RUNTIME}" == "docker" ] && ! kube::util::ensure_docker_daemon_connectivity; then
++#  exit 1
++#fi
+
+ if [[ "${CONTAINER_RUNTIME}" == "rkt" ]]; then
+   test_rkt
+
+if running kube-proxy in IPVS mode, since only the master node has IPVS implemented, the worker node kube-proxy still use iptables, there will be connectivity issue to pod running in the worker node, this can be resolved to run flannel in host gateway mode since flannel host gateway mode will setup the route for pods in worker node to use node ip as gateway.
+
+[root@fed-master kubernetes]# cat flannel-config-hostgw.json
+
+{
+
+"Network": "172.16.0.0/16",
+
+"SubnetLen": 24,
+
+"Backend":
+
+  {
+
+    "Type": "host-gw"
+
+  }
+
+}
+
+
+  #etcdctl rm /coreos.com/network/config
+
+#etcdctl set /coreos.com/network/config < flannel-config-hostgw.json
+
+Master node
+
+[root@fed-master kubernetes]# ip route show
+
+default via 192.168.48.254 dev ens3 proto static metric 100
+
+172.16.56.0/24 via 192.168.1.4 dev ens7
+
+172.16.84.0/24 dev docker0 proto kernel scope link src 172.16.84.1
+
+192.168.1.0/24 dev ens7 proto kernel scope link src 192.168.1.3 metric 100
+
+[root@fed-master kubernetes]# ip addr show dev docker0
+
+23: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc noqueue state UP group default
+
+    link/ether 02:42:9e:2f:92:38 brd ff:ff:ff:ff:ff:ff
+
+    inet 172.16.84.1/24 scope global docker0
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::42:9eff:fe2f:9238/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+[root@fed-master kubernetes]# ip addr show dev ens7
+
+3: ens7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc fq_codel state UP group default qlen 1000
+
+    link/ether 52:54:00:66:78:1c brd ff:ff:ff:ff:ff:ff
+
+    inet 192.168.1.3/24 brd 192.168.1.255 scope global ens7
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::2a6a:c357:14a7:55/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+ [root@fed-master kubernetes]# cluster/kubectl.sh get no -o wide
+NAME          STATUS    ROLES     AGE       VERSION                     EXTERNAL-IP   OS-IMAGE                 KERNEL-VERSION           CONTAINER-RUNTIME
+192.168.1.3   Ready     <none>    36m       v0.0.0-master+$Format:%h$   <none>        Fedora 26 (Twenty Six)   4.11.8-300.fc26.x86_64   docker://1.13.1
+fed-node2     Ready     <none>    28m       v1.7.3                      <none>        Fedora 26 (Twenty Six)   4.11.8-300.fc26.x86_64   docker://1.13.1
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get po -o wide
+
+NAME          READY     STATUS    RESTARTS   AGE       IP            NODE
+
+nginx-5vr9t   1/1       Running   0          25m       172.16.56.2   fed-node2
+
+nginx-n8cxl   1/1       Running   0          25m       172.16.84.3   192.168.1.3
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get svc -o wide
+
+NAME           TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)        AGE       SELECTOR
+
+kubernetes     ClusterIP   10.0.0.1     <none>        443/TCP        38m       <none>
+
+nginxservice   NodePort    10.0.0.24    <none>        80:32506/TCP   27m       app=nginx
+
+[root@fed-master kubernetes]# ipvsadm -ln
+
+IP Virtual Server version 1.2.1 (size=4096)
+
+Prot LocalAddress:Port Scheduler Flags
+
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+
+TCP  127.0.0.1:32506 rr
+
+  -> 172.16.56.2:80               Masq    1      0          0
+
+  -> 172.16.84.3:80               Masq    1      0          0
+
+TCP  172.16.84.1:32506 rr
+
+  -> 172.16.56.2:80               Masq    1      0          0
+
+  -> 172.16.84.3:80               Masq    1      0          0
+
+TCP  192.168.1.3:32506 rr
+
+  -> 172.16.56.2:80               Masq    1      0          0
+
+  -> 172.16.84.3:80               Masq    1      0          0
+
+TCP  192.168.1.5:32506 rr
+
+  -> 172.16.56.2:80               Masq    1      0          0
+
+  -> 172.16.84.3:80               Masq    1      0          0
+
+TCP  10.0.0.24:80 rr
+
+  -> 172.16.56.2:80               Masq    1      0          0
+
+  -> 172.16.84.3:80               Masq    1      0          0
+
+
+ Worker node
+
+[root@fed-node2 ~]# ip route show
+
+default via 192.168.48.254 dev ens3 proto static metric 100
+
+172.16.56.0/24 dev docker0 proto kernel scope link src 172.16.56.1
+
+172.16.84.0/24 via 192.168.1.3 dev ens7
+
+[root@fed-node2 ~]# ip addr show dev docker0
+
+6: docker0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc noqueue state UP group default
+
+    link/ether 02:42:6e:f5:f9:0f brd ff:ff:ff:ff:ff:ff
+
+    inet 172.16.56.1/24 scope global docker0
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::42:6eff:fef5:f90f/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+
+[root@fed-node2 ~]# ip addr show dev ens7
+
+3: ens7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc fq_codel state UP group default qlen 1000
+
+    link/ether 52:54:00:07:02:8f brd ff:ff:ff:ff:ff:ff
+
+    inet 192.168.1.4/24 brd 192.168.1.255 scope global ens7
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::ba37:e2c5:ccf2:1616/64 scope link
+
+       valid_lft forever preferred_lft forever
+
+    inet6 fe80::2a6a:c357:14a7:55/64 scope link tentative dadfailed
+
+       valid_lft forever preferred_lft forever
+Manage BIG-IP virtual servers - Kubernetes
+
+http://clouddocs.f5.com/containers/v2/kubernetes/kctlr-manage-bigip-objects.html
+
+download http://clouddocs.f5.com/containers/v2/_downloads/f5-resource-vs-example.configmap.yaml and modify it accordingly :
+1, create k8s nginx pod and nginx node port services:
+
+[root@fed-master kubernetes]# cat nginx_pod.yaml
+
+apiVersion: v1
+
+kind: ReplicationController
+
+metadata:
+
+  name: nginx
+
+spec:
+
+  replicas: 2
+
+  selector:
+
+    app: nginx
+
+  template:
+
+    metadata:
+
+      name: nginx
+
+      labels:
+
+        app: nginx
+
+    spec:
+
+      containers:
+
+      - name: nginx
+
+        image: nginx
+
+        ports:
+
+        - containerPort: 80
+
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get po -o wide
+
+NAME          READY     STATUS    RESTARTS   AGE       IP            NODE
+
+nginx-27rlx   1/1       Running   0          21h       172.16.14.2   fed-node2
+
+nginx-sl7xw   1/1       Running   0          21h       172.16.79.3   192.168.1.3
+
+
+[root@fed-master kubernetes]# cat nginx_service.yaml
+
+apiVersion: v1
+
+kind: Service
+
+metadata:
+
+  labels:
+
+    name: nginxservice
+
+  name: nginxservice
+
+spec:
+
+  ports:
+
+    # The port that this service should serve on.
+
+    - port: 80
+
+      nodePort: 32506
+
+  selector:
+
+    app: nginx
+
+  type: NodePort
+
+#  externalIPs:
+
+#    - 192.168.121.66
+
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get svc -o wide
+
+NAME           TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)        AGE       SELECTOR
+
+kubernetes     ClusterIP   10.0.0.1     <none>        443/TCP        1d        <none>
+
+nginxservice   NodePort    10.0.0.140   <none>        80:32506/TCP   21h       app=nginx
+
+
+the node port listener created by kube-proxy IPVS
+
+[root@fed-master kubernetes]# ipvsadm -ln
+
+IP Virtual Server version 1.2.1 (size=4096)
+
+Prot LocalAddress:Port Scheduler Flags
+
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+
+
+TCP  192.168.1.3:32506 rr
+
+  -> 172.16.14.2:80               Masq    1      0          4
+
+  -> 172.16.79.3:80               Masq    1      0          4
+2 modify f5-resource-vs-example.configmap.yaml based on k8s nginxservice
+
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  # name of the resource to create on the BIG-IP
+  name: http.vs
+  # The namespace to create the object in.
+  # The k8s-bigip-ctlr watches all namespaces by default (as of v1.1).
+  # If the k8s-bigip-ctlr is watching a specific namespace(s),
+  # this setting must match the namespace of the Service you want to proxy
+  # -AND- the namespace(s) the k8s-bigip-ctlr watches.
+  namespace: default
+  labels:
+    # tells the k8s-bigip-ctlr to watch this ConfigMap
+    f5type: virtual-server
+data:
+  # NOTE: schema v0.1.4 is required as of k8s-bigip-ctlr v1.3.0
+  schema: "f5schemadb://bigip-virtual-server_v0.1.4.json"
+  data: |
+    {
+      "virtualServer": {
+        "backend": {
+          "servicePort": 80,
+          "serviceName": "nginxservice",
+          "healthMonitors": [{
+            "interval": 30,
+            "protocol": "http",
+            "send": "GET /\r\n",
+            "timeout": 120
+          }]
+        },
+        "frontend": {
+          "virtualAddress": {
+            "port": 80,
+            "bindAddr": "192.168.1.9"
+          },
+          "partition": "test",
+          "balance": "round-robin",
+          "mode": "http"
+        }
+      }
+    }
+
+---
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: https.vs
+  labels:
+    f5type: virtual-server
+data:
+  schema: "f5schemadb://bigip-virtual-server_v0.1.4.json"
+  data: |
+    {
+      "virtualServer": {
+        "backend": {
+          "servicePort": 80,
+          "serviceName": "nginxservice",
+          "healthMonitors": [{
+            "interval": 30,
+            "protocol": "http",
+            "send": "GET /\r\n",
+            "timeout": 120
+          }]
+        },
+        "frontend": {
+          "virtualAddress": {
+            "port": 443,
+            "bindAddr": "192.168.1.9"
+          },
+          "partition": "test",
+          "balance": "round-robin",
+          "mode": "http",
+          "sslProfile": {
+          "f5ProfileName": "Common/clientssl"
+          }
+        }
+      }
+    }
+
+
+#cluster/kubectl.sh create -f f5-resource-vs-example.configmap.yaml
+3, verify k8s-bigip-ctrl pod logs
+
+#cluster/kubectl.sh logs test-bigip-controller-1-69cb56f6d7-m4bk2  --namespace=kube-system
+
+2018/01/24 18:43:14 [INFO] ConfigWriter started: 0xc420112210
+
+2018/01/24 18:43:14 [INFO] Started config driver sub-process at pid: 17
+
+2018/01/24 18:43:14 [INFO] NodePoller (0xc42007a7e0) registering new listener: 0x406550
+
+2018/01/24 18:43:15 [INFO] NodePoller started: (0xc42007a7e0)
+
+2018/01/24 18:43:15 [WARNING] Overwriting existing entry for backend {ServiceName:nginxservice ServicePort:80 Namespace:default}
+
+2018/01/24 18:43:16 [WARNING] Overwriting existing entry for backend {ServiceName:nginxservice ServicePort:80 Namespace:default}
+
+2018/01/24 18:43:16 [INFO] Wrote 2 Virtual Server configs
+
+2018/01/24 18:43:19 [INFO] [2018-01-24 18:43:19,273 f5_cccl.bigip INFO] BigIPProxy managed types: /tm/ltm/virtual,/tm/ltm/pool,/tm/ltm/monitor,/tm/sys/application/service
+
+2018/01/24 18:43:21 [INFO] [2018-01-24 18:43:21,274 __main__ INFO] entering inotify loop to watch /tmp/k8s-bigip-ctlr.config738141005/config.json
+
+2018/01/24 18:43:21 [INFO] [2018-01-24 18:43:21,588 f5_cccl.resource.resource INFO] Updating ApiIRule: /test/http_redirect_irule
+
+2018/01/24 18:43:21 [INFO] [2018-01-24 18:43:21,705 f5_cccl.resource.resource INFO] Updating ApiVirtualServer: /test/default_https.vs
+
+2018/01/24 18:43:21 [INFO] [2018-01-24 18:43:21,773 f5_cccl.resource.resource INFO] Updating ApiVirtualServer: /test/default_http.vs
+
+2018/01/24 18:43:45 [WARNING] Overwriting existing entry for backend {ServiceName:nginxservice ServicePort:80 Namespace:default}
+
+2018/01/24 18:43:45 [WARNING] Overwriting existing entry for backend {ServiceName:nginxservice ServicePort:80 Namespace:default}
+
+2018/01/24 18:43:45 [INFO] Wrote 2 Virtual Server configs
+4, verify BIGIP LTM virtual configuration
+
+[root@bigip-kvm:Active:Standalone] test # tmsh
+
+root@(bigip-kvm)(cfg-sync Standalone)(Active)(/Common)(tmos)# cd /test
+
+root@(bigip-kvm)(cfg-sync Standalone)(Active)(/test)(tmos)# list ltm virtual
+
+ltm virtual default_http.vs {
+
+    destination 192.168.1.9:http
+
+    ip-protocol tcp
+
+    mask 255.255.255.255
+
+    partition test
+
+    pool default_http.vs
+
+    profiles {
+
+        /Common/http { }
+
+        /Common/tcp { }
+
+    }
+
+    source 0.0.0.0/0
+
+    source-address-translation {
+
+        type automap
+
+    }
+
+    translate-address enabled
+
+    translate-port enabled
+
+    vs-index 5
+
+}
+
+ltm virtual default_https.vs {
+
+    destination 192.168.1.9:https
+
+    ip-protocol tcp
+
+    mask 255.255.255.255
+
+    partition test
+
+    pool default_https.vs
+
+    profiles {
+
+        /Common/clientssl {
+
+            context clientside
+
+        }
+
+        /Common/http { }
+
+        /Common/tcp { }
+
+    }
+
+    source 0.0.0.0/0
+
+    source-address-translation {
+
+        type automap
+
+    }
+
+    translate-address enabled
+
+    translate-port enabled
+
+    vs-index 6
+
+}
+
+Note the ltm pool has k8s node 192.168.1.3 (fed-master), 192.168.1.4 (fed-node2), port 32506 as ltm pool member
+
+root@(bigip-kvm)(cfg-sync Standalone)(Active)(/test)(tmos)# list ltm pool
+
+ltm pool default_http.vs {
+
+    members {
+
+        192.168.1.3:32506 {
+
+            address 192.168.1.3
+
+            session monitor-enabled
+
+            state up
+
+        }
+
+        192.168.1.4:32506 {
+
+            address 192.168.1.4
+
+            session monitor-enabled
+
+            state up
+
+        }
+
+    }
+
+    monitor default_http.vs_0_http
+
+    partition test
+
+}
+
+ltm pool default_https.vs {
+
+    members {
+
+        192.168.1.3:32506 {
+
+            address 192.168.1.3
+
+            session monitor-enabled
+
+            state up
+
+        }
+
+        192.168.1.4:32506 {
+
+            address 192.168.1.4
+
+            session monitor-enabled
+
+            state up
+
+        }
+
+    }
+
+    monitor default_https.vs_0_http
+
+    partition test
+
+}
+ 5 test virtual traffic
+
+[root@fed-node2 ~]# curl -k https://192.168.1.9
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+    body {
+        width: 35em;
+        margin: 0 auto;
+        font-family: Tahoma, Verdana, Arial, sans-serif;
+    }
+</style>
+</head>
+<body>
+<h1>Welcome to nginx!</h1>
+<p>If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.</p>
+
+<p>For online documentation and support please refer to
+<a href="http://nginx.org/">nginx.org</a>.<br/>
+Commercial support is available at
+<a href="http://nginx.com/">nginx.com</a>.</p>
+
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+
+[root@fed-node2 ~]# curl  http://192.168.1.9
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+    body {
+        width: 35em;
+        margin: 0 auto;
+        font-family: Tahoma, Verdana, Arial, sans-serif;
+    }
+</style>
+</head>
+<body>
+<h1>Welcome to nginx!</h1>
+<p>If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.</p>
+
+<p>For online documentation and support please refer to
+<a href="http://nginx.org/">nginx.org</a>.<br/>
+Commercial support is available at
+<a href="http://nginx.com/">nginx.com</a>.</p>
+
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+
+
+

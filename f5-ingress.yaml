@@ -1,0 +1,21 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: single-service
+  annotations:
+     'virtual-server.f5.com/ip': '192.168.1.10'
+     'virtual-server.f5.com/health': |
+      [
+        {
+          "path":     "/",
+          "send":     "HTTP GET /",
+          "interval": 5,
+          "timeout":  16
+        }
+      ]
+spec:
+  tls:
+  - secretName: Common/clientssl
+  backend:
+    serviceName: nginxservice 
+    servicePort: 80

@@ -1,0 +1,102 @@
+https://github.com/kubernetes/kubernetes/tree/master/pkg/proxy/ipvs
+
+continuing the work of Running Multi-Node Kubernetes and BIGIP k8s-bigip-ctlr
+
+when running k8s with second worker node, the worker node may runs kube-proxy package that comes with the OS distribution which may be a few release behind the upstream k8s
+
+for example fedora 26 comes with k8s 1.7.3 which does not have kube-proxy ipvs module implemented
+
+
+Can I run custom build kube-proxy in worker node with kube-proxy ipvs mode? the answer is yes
+
+build a custom kube-proxy from github k8s is actually pretty easy:
+1
+
+#git clone --depth=1 https://github.com/kubernetes/kubernetes.git
+
+#cd kubernetes
+
+#git pull
+
+#make -C `pwd` WHAT="cmd/kube-proxy"
+
+kube-proxy binary will be built and created under following, and kube-proxy is statically linked by default so it can be copied to worker node without any dependency issue
+
+./_output/local/go/bin/kube-proxy
+
+./_output/local/bin/linux/amd64/kube-proxy
+
+[root@fed-master kubernetes]# file ./_output/local/bin/linux/amd64/kube-proxy
+
+./_output/local/bin/linux/amd64/kube-proxy: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, with debug_info, not stripped
+2
+
+now to replace the kube-proxy binary from  OS distribution with this upstream kube-proxy
+
+Note to run kube-proxy ipvs mode, the feature gate has to be enabled
+
+ for example for fedora:
+
+[root@fed-node2 kubernetes]# cat /etc/kubernetes/proxy
+
+###
+
+# kubernetes proxy config
+
+
+# default config should be adequate
+
+
+# Add your own!
+
+KUBE_PROXY_ARGS="--feature-gates SupportIPVSProxyMode=true --proxy-mode ipvs"
+
+
+#systemctl stop kube-proxy kubelet
+
+#systemctl disable kube-proxy kubelet
+
+#cp  /usr/bin/kube-proxy /usr/bin/kube-proxy-v1.7.3
+
+#cp <upstream kube-proxy build>  /usr/bin/kube-proxy
+
+#systemctl enable kube-proxy kubelet
+
+#systemctl start kube-proxy kubelet
+
+[root@fed-master kubernetes]# cluster/kubectl.sh get no -o wide
+NAME          STATUS    ROLES     AGE       VERSION                                    EXTERNAL-IP   OS-IMAGE                 KERNEL-VERSION           CONTAINER-RUNTIME
+192.168.1.3   Ready     <none>    42m       v1.10.0-alpha.2.185+1150de9ce65775-dirty   <none>        Fedora 26 (Twenty Six)   4.11.8-300.fc26.x86_64   docker://1.13.1
+fed-node2     Ready     <none>    24m       v1.7.3                                     <none>        Fedora 26 (Twenty Six)   4.11.8-300.fc26.x86_64   docker://1.13.1
+
+Note kubelet will still be version from OS distribution, but kube-proxy runs with ipvs mode
+
+[root@fed-node2 kubernetes]# ipvsadm -ln
+
+IP Virtual Server version 1.2.1 (size=4096)
+
+Prot LocalAddress:Port Scheduler Flags
+
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+
+
+TCP  192.168.122.1:32506 rr
+
+  -> 172.16.54.2:80               Masq    1      0          0
+
+  -> 172.16.58.3:80               Masq    1      0          0
+
+
+TCP  192.168.1.4:32506 rr
+
+  -> 172.16.54.2:80               Masq    1      0          16
+
+  -> 172.16.58.3:80               Masq    1      0          16
+
+Note the current kube-proxy ipvs mode would create the service listener for all local ip addresses of the worker node instead of just the worker node  node ip, the one marked with blue color
+
+thinking contributing code to k8s, this might be a good candidate  
+
+
+
+
